@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="snowflake-source" content="cortex-agent-authored" />
+  <title>Python UDFs &amp; UDTFs in the Warehouse - Visual Guide</title>
+  <script type="application/json" id="snowflake-report-metadata">
+  {
+    "generated": "2026-11-19",
+    "intent": "Teaching diagrams for udxf_enablement.ipynb: creating/calling UDxFs, UDF vs UDTF, warehouse parallelism (nodes x 8 lanes), and a railroad analogy",
+    "dataSources": [
+      { "type": "file", "path": "enablement/wh_data_parallelism/udxf_enablement.ipynb" }
+    ],
+    "sections": [
+      { "id": "create-call", "title": "1. Ways to create and call a UDxF",
+        "producerNotes": "Illustration only. Function names match sections 2-5 of the notebook." },
+      { "id": "udf-vs-udtf", "title": "2. UDF vs UDTF",
+        "producerNotes": "Illustration only. Uses UDXF_NET_REVENUE (UDF) and UDXF_STORE_ELASTICITY (UDTF, PARTITION BY STORE_ID)." },
+      { "id": "parallelism", "title": "3. How the warehouse runs it in parallel",
+        "producerNotes": "Illustration only. Small/Medium/Large = 2/4/8 nodes x 8 CPUs = wh_dop 16/32/64, as in notebook section 6." },
+      { "id": "railroad", "title": "4. The railroad analogy",
+        "producerNotes": "Illustration only. Track = lane, train = hot Python runtime + code, cargo = data batches." }
+    ]
+  }
+  </script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: light-dark(#1f2937, #e5e7eb);
+      --muted: light-dark(#6b7280, #9ca3af);
+      --line: light-dark(#d1d5db, #374151);
+      --card: light-dark(#ffffff, #111827);
+      --soft: light-dark(#f3f6f9, #1a2333);
+      --sf: #29B5E8;
+      --sf-dark: light-dark(#11567F, #7cd3f5);
+      --udf: light-dark(#0e7490, #67e8f9);
+      --udtf: light-dark(#7c3aed, #c4b5fd);
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+      max-width: 1000px; width: 100%;
+      margin: 0 auto; padding: clamp(16px, 4vw, 28px);
+      color: var(--fg); line-height: 1.5;
+    }
+    h1 { margin: 0 0 4px; font-size: clamp(22px, 4vw, 30px); color: light-dark(#0f172a, #f1f5f9); }
+    h2 { margin: 48px 0 6px; font-size: 22px; color: light-dark(#0f172a, #f1f5f9); scroll-margin-top: 12px; }
+    h3 { margin: 0 0 8px; font-size: 16px; }
+    p.lead { color: var(--muted); margin: 0 0 18px; }
+    a { color: light-dark(#2563eb, #60a5fa); }
+    code { font: 12.5px/1.4 ui-monospace, Menlo, monospace; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+    pre { margin: 6px 0 0; padding: 8px 10px; background: var(--soft); border-radius: 6px; overflow-x: auto;
+          font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; }
+    pre code { background: none; padding: 0; }
+
+    /* Outline */
+    nav.toc { border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; background: var(--soft); }
+    nav.toc ol { margin: 6px 0 0; padding-left: 20px; }
+    nav.toc li { margin: 3px 0; }
+    .back { font-size: 13px; float: right; margin-top: -30px; }
+
+    .card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 12px 14px; }
+    .takeaway { border-left: 4px solid var(--sf); background: var(--soft); padding: 10px 14px; border-radius: 0 8px 8px 0; margin-top: 16px; }
+
+    /* Arrows live in their own grid cells - they never cross a box */
+    .arrow { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 22px; user-select: none; }
+    .arrow.down { padding: 2px 0; }
+
+    /* ---------- 1. create & call ---------- */
+    .cc-head, .cc-row { display: grid; grid-template-columns: minmax(0, 1.5fr) 34px minmax(0, 1fr) 34px minmax(0, 1.2fr); gap: 0; align-items: stretch; }
+    .cc-head { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+    .cc-row { margin-bottom: 12px; }
+    .cc-row .card h3 span.tag { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 2px; }
+    .tag.udf { background: color-mix(in srgb, var(--udf) 18%, transparent); color: var(--udf); }
+    .tag.udtf { background: color-mix(in srgb, var(--udtf) 18%, transparent); color: var(--udtf); }
+    .obj { display: flex; flex-direction: column; justify-content: center; text-align: center; }
+    .obj .kind { font-size: 12px; color: var(--muted); }
+    .obj .name { font-weight: 600; word-break: break-word; }
+    .calls .call { margin-bottom: 6px; }
+    .calls .call:last-child { margin-bottom: 0; }
+    .calls .lbl { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .calls pre { margin-top: 2px; }
+    .section-ref { font-size: 12px; color: var(--muted); }
+
+    /* ---------- 2. UDF vs UDTF ---------- */
+    .vs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+    .flow { display: grid; grid-template-rows: auto; }
+    .flow > .card { text-align: center; }
+    .flow .step-lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+    .col-title { text-align: center; font-weight: 700; font-size: 18px; margin-bottom: 8px; }
+    .col-title.udf { color: var(--udf); }
+    .col-title.udtf { color: var(--udtf); }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
+    .chip { width: 18px; height: 14px; border-radius: 3px; display: inline-block; }
+    .batches { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .batch { border: 1.5px dashed var(--line); border-radius: 6px; padding: 5px; display: flex; flex-wrap: wrap; gap: 3px; width: 82px; justify-content: center; }
+    .batch .cap { width: 100%; font-size: 10px; color: var(--muted); }
+    .handler { font: 12px ui-monospace, Menlo, monospace; }
+    .mini-table { margin: 0 auto; border-collapse: collapse; font-size: 12px; }
+    .mini-table th, .mini-table td { border: 1px solid var(--line); padding: 2px 8px; }
+    .mini-table th { background: var(--soft); }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+    .legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .props { margin: 10px 0 0; padding-left: 18px; font-size: 14px; text-align: left; }
+
+    /* ---------- 3. parallelism ---------- */
+    .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 8px 0 14px; }
+    .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .seg button { border: 0; background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer; }
+    .seg button + button { border-left: 1px solid var(--line); }
+    .seg button.active { background: var(--sf); color: #fff; }
+    .seg button:focus-visible { outline: 2px solid var(--sf); outline-offset: -2px; }
+    .ctl-lbl { font-size: 12px; color: var(--muted); margin-right: 6px; }
+    .stat { font-size: 14px; }
+    .stat b { color: var(--sf-dark); }
+
+    .table-src { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    .mp { width: 26px; height: 20px; border-radius: 3px; background: color-mix(in srgb, var(--sf) 35%, transparent); border: 1px solid var(--sf); }
+    .wh { border: 2px solid var(--sf); border-radius: 12px; padding: 12px; background: color-mix(in srgb, var(--sf) 5%, transparent); }
+    .wh-title { font-weight: 700; color: var(--sf-dark); margin-bottom: 8px; }
+    .nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+    .node { border: 1px solid var(--line); border-radius: 8px; background: var(--card); padding: 8px; }
+    .node-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .node-title .serve { color: var(--muted); font-weight: 400; }
+    .lane { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 6px; padding: 2px 0; border-top: 1px dotted var(--line); }
+    .lane:first-of-type { border-top: 0; }
+    .lane .lname { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+    .lane .lname .hot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #f97316; margin-right: 3px; vertical-align: 1px; }
+    .lane .load { display: flex; gap: 2px; overflow: hidden; }
+    .lane .load .chip { width: 12px; height: 10px; }
+    .lane .store-lbl { font-size: 10px; color: var(--muted); margin-left: 4px; white-space: nowrap; }
+    .compact .lane { padding: 1px 0; }
+    .compact .lane .lname { font-size: 9.5px; }
+
+    /* ---------- 4. railroad ---------- */
+    .map { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin: 8px 0 16px; }
+    .map .card { font-size: 14px; }
+    .map .card b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+    .yard { border: 2px solid var(--sf); border-radius: 12px; padding: 10px; }
+    .yard-node { margin-bottom: 10px; }
+    .yard-node:last-child { margin-bottom: 0; }
+    .yard-node .node-title { margin-bottom: 4px; }
+    .track { position: relative; overflow: hidden; height: 30px; margin: 4px 0; border-radius: 4px;
+             background:
+               repeating-linear-gradient(90deg, transparent 0 14px, color-mix(in srgb, var(--muted) 45%, transparent) 14px 17px),
+               linear-gradient(transparent 9px, var(--muted) 9px 11px, transparent 11px 19px, var(--muted) 19px 21px, transparent 21px); }
+    .train { position: absolute; top: 3px; left: 0; display: flex; gap: 3px; align-items: center;
+             animation: run var(--dur, 9s) linear infinite; animation-delay: var(--delay, 0s); }
+    .engine { height: 24px; padding: 0 7px; border-radius: 6px 12px 4px 4px; background: #334155; color: #fff;
+              font: 600 10px/24px system-ui, sans-serif; white-space: nowrap; }
+    .engine .hot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #f97316; margin-right: 4px; vertical-align: 0; }
+    .car { width: 22px; height: 18px; border-radius: 3px; }
+    @keyframes run { from { transform: translateX(-30%); } to { transform: translateX(calc(var(--trackw, 800px) - 40%)); } }
+    @media (prefers-reduced-motion: reduce) { .train { animation: none; left: 8px; } }
+    .station { font-size: 11px; color: var(--muted); }
+
+    @media (max-width: 640px) {
+      .cc-head { display: none; }
+      .cc-row { grid-template-columns: 1fr; }
+      .cc-row .arrow { transform: rotate(90deg); height: 26px; }
+    }
+  </style>
+</head>
+<body id="top">
+
+  <h1>Python UDFs &amp; UDTFs in the Warehouse</h1>
+  <p class="section-ref" style="margin:0 0 6px">Author: Garrett Frere (garrett.frere@snowflake.com)</p>
+  <p class="lead">A visual companion to <code>udxf_enablement.ipynb</code>. Same synthetic data: <code>ML_PERF.PUBLIC.STORE_SALES</code>, 100M sale lines across 1,000 stores.</p>
+
+  <nav class="toc" aria-label="Outline">
+    <strong>Outline</strong>
+    <ol>
+      <li><a href="#create-call">Ways to create and call a UDxF</a></li>
+      <li><a href="#udf-vs-udtf">UDF vs UDTF: batches vs partitions, scalar vs tabular</a></li>
+      <li><a href="#parallelism">How the warehouse runs it in parallel (nodes x 8 lanes)</a></li>
+      <li><a href="#railroad">The railroad analogy</a></li>
+    </ol>
+  </nav>
+
+  <!-- ================= 1 ================= -->
+  <h2 id="create-call">1. Ways to create and call a UDxF</h2>
+  <a class="back" href="#top">Back to top</a>
+  <p class="lead">Four ways to create a function, all used in the notebook. Once created, every one of them can be called from Python <em>and</em> from SQL.</p>
+
+  <div class="cc-head" aria-hidden="true">
+    <div>How you create it</div><div></div><div>What Snowflake has</div><div></div><div>How you call it</div>
+  </div>
+
+  <div class="cc-row">
+    <div class="card">
+      <h3>Inline, anonymous <span class="tag udf">UDF</span></h3>
+      <pre><code>log_price_udf = F.pandas_udf(
+    lambda price: np.log(price), ...)</code></pre>
+      <div class="section-ref">Notebook section 2. Lives for this session only.</div>
+    </div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card obj"><span class="kind">temporary function</span><span class="name">(no name)</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card calls">
+      <div class="call"><span class="lbl">Python</span><pre><code>df.with_column("LOG_PRICE",
+  log_price_udf(col("PRICE")))</code></pre></div>
+      <div class="call"><span class="lbl">SQL</span><div class="section-ref">Not callable: it has no name.</div></div>
+    </div>
+  </div>
+
+  <div class="cc-row">
+    <div class="card">
+      <h3>Decorator, permanent <span class="tag udf">UDF</span></h3>
+      <pre><code>@F.pandas_udf(name="...UDXF_NET_REVENUE",
+    is_permanent=True, stage_location=STAGE)
+def udxf_net_revenue(price, units, promo): ...</code></pre>
+      <div class="section-ref">Notebook section 3.</div>
+    </div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card obj"><span class="kind">permanent function</span><span class="name">UDXF_NET_REVENUE</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card calls">
+      <div class="call"><span class="lbl">Python</span><pre><code>F.call_function("UDXF_NET_REVENUE",
+  col("PRICE"), col("UNITS"), col("PROMO_FLAG"))</code></pre></div>
+      <div class="call"><span class="lbl">SQL</span><pre><code>SELECT UDXF_NET_REVENUE(price, units, promo_flag)
+FROM store_sales;</code></pre></div>
+    </div>
+  </div>
+
+  <div class="cc-row">
+    <div class="card">
+      <h3>From a handler file <span class="tag udf">UDF</span></h3>
+      <pre><code>session.udf.register_from_file(
+    file_path="adjusted_revenue.py",
+    func_name="adjusted_revenue", ...)</code></pre>
+      <div class="section-ref">Notebook section 4. The file uses <code>@udf_init_once</code> to load reference data once and share it with every worker.</div>
+    </div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card obj"><span class="kind">permanent function</span><span class="name">UDXF_ADJUSTED_REVENUE</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card calls">
+      <div class="call"><span class="lbl">Python</span><pre><code>adjusted_revenue_udf(col("STORE_ID"),
+  col("SKU_ID"), col("PRICE"), col("UNITS"))</code></pre></div>
+      <div class="call"><span class="lbl">SQL</span><pre><code>SELECT UDXF_ADJUSTED_REVENUE(store_id, sku_id,
+  price, units) FROM store_sales;</code></pre></div>
+    </div>
+  </div>
+
+  <div class="cc-row">
+    <div class="card">
+      <h3>Handler class <span class="tag udtf">UDTF</span></h3>
+      <pre><code>class StoreElasticity:
+    def end_partition(self, df): ...
+session.udtf.register(StoreElasticity,
+    name="...UDXF_STORE_ELASTICITY", ...)</code></pre>
+      <div class="section-ref">Notebook section 5.</div>
+    </div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card obj"><span class="kind">permanent table function</span><span class="name">UDXF_STORE_ELASTICITY</span></div>
+    <div class="arrow" aria-hidden="true">&rarr;</div>
+    <div class="card calls">
+      <div class="call"><span class="lbl">Python</span><pre><code>store_elasticity_udtf(...)
+  .over(partition_by="STORE_ID")</code></pre></div>
+      <div class="call"><span class="lbl">SQL</span><pre><code>SELECT * FROM store_sales,
+  TABLE(UDXF_STORE_ELASTICITY(...)
+    OVER (PARTITION BY store_id));</code></pre></div>
+    </div>
+  </div>
+
+  <div class="takeaway"><strong>Takeaway:</strong> how you create it is a matter of convenience. Once it's a named, permanent function, anyone can call it from Python or SQL, in any session.</div>
+
+  <!-- ================= 2 ================= -->
+  <h2 id="udf-vs-udtf">2. UDF vs UDTF</h2>
+  <a class="back" href="#top">Back to top</a>
+  <p class="lead">Same input rows. The difference is <strong>how rows are grouped before they reach Python</strong> and <strong>what shape comes back</strong>.</p>
+
+  <div class="vs">
+    <div class="flow" id="flow-udf">
+      <div class="col-title udf">UDF: UDXF_NET_REVENUE</div>
+      <div class="card"><div class="step-lbl">1 · Input rows (colour = store)</div><div class="chips" data-fill="mixed" data-n="24"></div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">2 · Arbitrary batches</div>
+        <div class="batches" data-batches="udf"></div>
+        <div class="section-ref" style="margin-top:6px">Any rows, any store, any order (e.g. up to 10,000 rows a batch).</div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">3 · Python handler, once per batch</div>
+        <div class="handler">price * units * (1 - 0.10 * promo)</div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">4 · Scalar output</div>
+        <div>One value per input row, as a <strong>new column</strong>.</div>
+        <div class="section-ref">24 rows in → 24 values out</div></div>
+      <ul class="props">
+        <li><strong>Stateless:</strong> each row is calculated on its own.</li>
+        <li><strong>Batching is up to Snowflake:</strong> the code doesn't care which rows are together.</li>
+        <li>Output: <strong>1 value per row</strong>.</li>
+      </ul>
+    </div>
+
+    <div class="flow" id="flow-udtf">
+      <div class="col-title udtf">UDTF: UDXF_STORE_ELASTICITY</div>
+      <div class="card"><div class="step-lbl">1 · Input rows (colour = store)</div><div class="chips" data-fill="mixed" data-n="24"></div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">2 · PARTITION BY STORE_ID</div>
+        <div class="batches" data-batches="udtf"></div>
+        <div class="section-ref" style="margin-top:6px">Every row of a store lands together, in one handler.</div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">3 · Python handler, once per partition</div>
+        <div class="handler">fit log(units) ~ log(price) + promo</div></div>
+      <div class="arrow down" aria-hidden="true">&darr;</div>
+      <div class="card"><div class="step-lbl">4 · Tabular output</div>
+        <div style="overflow-x:auto"><table class="mini-table">
+          <thead><tr><th>STORE</th><th>ELASTICITY</th><th>PROMO_LIFT</th></tr></thead>
+          <tbody><tr><td>1</td><td>0.87</td><td>0.20</td></tr><tr><td>2</td><td>1.24</td><td>0.19</td></tr><tr><td>3</td><td>0.61</td><td>0.21</td></tr><tr><td>4</td><td>0.98</td><td>0.20</td></tr></tbody>
+        </table></div>
+        <div class="section-ref">24 rows in → 4 rows out (one per store), any columns you choose</div></div>
+      <ul class="props">
+        <li><strong>Stateful input:</strong> the handler sees the <em>whole</em> store at once (a regression needs every row).</li>
+        <li><strong>Grouping is up to you:</strong> the partition key decides what goes together.</li>
+        <li>Output: <strong>a table</strong>, with any number of rows and columns.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="legend" id="store-legend"></div>
+
+  <div class="takeaway"><strong>Rule of thumb:</strong> if the answer for a row only needs that row, use a <strong>UDF</strong>. If it needs a group of rows together (per store, per customer, per device), use a <strong>UDTF</strong> with <code>PARTITION BY</code>. It's the Snowflake equivalent of <code>groupBy().applyInPandas()</code>.</div>
+
+  <!-- ================= 3 ================= -->
+  <h2 id="parallelism">3. How the warehouse runs it in parallel</h2>
+  <a class="back" href="#top">Back to top</a>
+  <p class="lead">Each warehouse node has 8 CPUs, and each CPU runs one <strong>lane</strong>: a Python process that's already started (hot) and waiting. The same warehouse that reads the table feeds the data straight into those lanes. Data never leaves the warehouse to reach Python.</p>
+
+  <div class="controls">
+    <div><span class="ctl-lbl">Warehouse</span>
+      <span class="seg" role="group" aria-label="Warehouse size" id="size-seg">
+        <button type="button" data-nodes="2" class="active" aria-pressed="true">Small</button>
+        <button type="button" data-nodes="4" aria-pressed="false">Medium</button>
+        <button type="button" data-nodes="8" aria-pressed="false">Large</button>
+      </span></div>
+    <div><span class="ctl-lbl">Workload</span>
+      <span class="seg" role="group" aria-label="Workload" id="mode-seg">
+        <button type="button" data-mode="udf" class="active" aria-pressed="true">UDF</button>
+        <button type="button" data-mode="udtf" aria-pressed="false">UDTF</button>
+      </span></div>
+    <div class="stat" id="dop-stat" aria-live="polite"></div>
+  </div>
+
+  <div class="card" style="margin-bottom:0">
+    <div class="step-lbl" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:center;margin-bottom:6px">STORE_SALES: micro-partitions in storage</div>
+    <div class="table-src" id="mps"></div>
+  </div>
+  <div class="arrow down" aria-hidden="true">&darr;&nbsp;<span style="font-size:13px">each node reads its share of the table and serves it to its own lanes</span>&nbsp;&darr;</div>
+  <div class="wh">
+    <div class="wh-title" id="wh-title"></div>
+    <div class="nodes" id="nodes"></div>
+  </div>
+  <p class="section-ref" id="mode-note" style="margin-top:8px"></p>
+
+  <div class="takeaway"><strong>Takeaway:</strong> <code>wh_dop</code> = nodes × 8. Doubling the warehouse doubles the lanes, and your code doesn't change. A UDF can spread its batches over every lane. A UDTF keeps each partition whole on one lane, so it scales with the number of partitions: 1,000 stores is plenty to keep 64 lanes busy.</div>
+
+  <!-- ================= 4 ================= -->
+  <h2 id="railroad">4. The railroad analogy</h2>
+  <a class="back" href="#top">Back to top</a>
+  <p class="lead">The same picture as section 3, told as a railroad.</p>
+
+  <div class="map">
+    <div class="card"><b>Track</b>A lane (one CPU). 8 tracks per node.</div>
+    <div class="card"><b>Train</b>Your Python code plus its runtime. The engine stays <strong>hot</strong>: it isn't rebuilt for every trip.</div>
+    <div class="card"><b>Cargo</b>The data. Each car is one batch of rows.</div>
+    <div class="card"><b>Rail yard</b>The warehouse loads the cargo onto the trains itself, with no hand-off to another system.</div>
+  </div>
+
+  <div class="controls">
+    <div><span class="ctl-lbl">Workload</span>
+      <span class="seg" role="group" aria-label="Railroad workload" id="rail-seg">
+        <button type="button" data-mode="udf" class="active" aria-pressed="true">UDF</button>
+        <button type="button" data-mode="udtf" aria-pressed="false">UDTF</button>
+      </span></div>
+    <div class="stat" id="rail-note"></div>
+  </div>
+  <div class="yard" id="yard"></div>
+
+  <div class="takeaway"><strong>Takeaway:</strong> a bigger warehouse builds more tracks and puts a hot train on each one. Your code is the train, so it doesn't change. <strong>UDF:</strong> any car can ride any train. <strong>UDTF:</strong> every car bound for the same destination (a store) must ride the <em>same</em> train, because that train needs all of the store's cargo to do its job.</div>
+
+  <p class="section-ref" style="margin-top:32px">Diagrams are illustrative. Elasticity values in section 2 are examples, not query results.</p>
+
+<script>
+(function () {
+  // 8 store colours, readable in light and dark
+  var STORES = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#a855f7', '#ec4899', '#14b8a6', '#84cc16'];
+  // deterministic pseudo-random so the picture is stable on reload
+  var seed = 7;
+  function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+  function chip(color, title) {
+    var s = document.createElement('span');
+    s.className = 'chip'; s.style.background = color;
+    if (title) s.title = title;
+    return s;
+  }
+
+  // ---------- section 2 ----------
+  var rows = [];
+  for (var i = 0; i < 24; i++) rows.push(i % 4);            // 4 stores, 6 rows each
+  rows.sort(function () { return rnd() - 0.5; });             // arrive in mixed order
+  document.querySelectorAll('[data-fill="mixed"]').forEach(function (el) {
+    rows.forEach(function (s) { el.appendChild(chip(STORES[s], 'Store ' + (s + 1))); });
+  });
+  document.querySelectorAll('[data-batches]').forEach(function (el) {
+    var udf = el.dataset.batches === 'udf';
+    var groups = udf
+      ? [rows.slice(0, 8), rows.slice(8, 16), rows.slice(16, 24)]
+      : [0, 1, 2, 3].map(function (s) { return rows.filter(function (r) { return r === s; }); });
+    groups.forEach(function (g, gi) {
+      var b = document.createElement('div'); b.className = 'batch';
+      var cap = document.createElement('div'); cap.className = 'cap';
+      cap.textContent = udf ? 'batch ' + (gi + 1) : 'store ' + (gi + 1);
+      b.appendChild(cap);
+      g.forEach(function (s) { b.appendChild(chip(STORES[s])); });
+      el.appendChild(b);
+    });
+  });
+  var lg = document.getElementById('store-legend');
+  for (var s = 0; s < 4; s++) {
+    var sp = document.createElement('span');
+    sp.appendChild(chip(STORES[s])); sp.appendChild(document.createTextNode('Store ' + (s + 1)));
+    lg.appendChild(sp);
+  }
+
+  // ---------- section 3 ----------
+  var state = { nodes: 2, mode: 'udf' };
+  var mps = document.getElementById('mps');
+  for (var m = 0; m < 14; m++) { var d = document.createElement('div'); d.className = 'mp'; mps.appendChild(d); }
+
+  function renderNodes() {
+    seed = 11;
+    var wrap = document.getElementById('nodes');
+    wrap.innerHTML = '';
+    wrap.classList.toggle('compact', state.nodes === 8);
+    var names = { 2: 'Small', 4: 'Medium', 8: 'Large' };
+    var dop = state.nodes * 8;
+    document.getElementById('wh-title').textContent =
+      names[state.nodes] + ' warehouse: ' + state.nodes + ' nodes \u00d7 8 lanes = ' + dop + ' Python lanes running at once';
+    document.getElementById('dop-stat').innerHTML = '<b>wh_dop = ' + state.nodes + ' \u00d7 8 = ' + dop + '</b>';
+    for (var n = 0; n < state.nodes; n++) {
+      var node = document.createElement('div'); node.className = 'node';
+      var t = document.createElement('div'); t.className = 'node-title';
+      t.innerHTML = '<span>Node ' + (n + 1) + '</span><span class="serve">reads its data, then serves it to its lanes</span>';
+      node.appendChild(t);
+      for (var l = 0; l < 8; l++) {
+        var lane = document.createElement('div'); lane.className = 'lane';
+        var nm = document.createElement('div'); nm.className = 'lname';
+        nm.innerHTML = '<span class="hot" title="Python runtime hot"></span>lane ' + (l + 1);
+        var load = document.createElement('div'); load.className = 'load';
+        var laneIdx = n * 8 + l;
+        if (state.mode === 'udf') {
+          for (var k = 0; k < 8; k++) load.appendChild(chip(STORES[Math.floor(rnd() * 8)]));
+        } else {
+          var col = STORES[laneIdx % 8];
+          for (var k2 = 0; k2 < 8; k2++) load.appendChild(chip(col));
+          var lbl = document.createElement('span'); lbl.className = 'store-lbl';
+          lbl.textContent = 'store ' + (laneIdx + 1);
+          load.appendChild(lbl);
+        }
+        lane.appendChild(nm); lane.appendChild(load);
+        node.appendChild(lane);
+      }
+      wrap.appendChild(node);
+    }
+    document.getElementById('mode-note').textContent = state.mode === 'udf'
+      ? 'UDF: batches from any store go to whichever lane is free. Mixed colours in a lane are fine, because each row stands alone.'
+      : 'UDTF: each lane gets every row of one store (one colour), runs end_partition, then moves on to its next store. With 1,000 stores, each of the ' + dop + ' lanes works through about ' + Math.ceil(1000 / dop) + ' stores.';
+  }
+
+  function wireSeg(id, key, cb) {
+    var seg = document.getElementById(id);
+    seg.querySelectorAll('button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        seg.querySelectorAll('button').forEach(function (x) {
+          x.classList.toggle('active', x === b); x.setAttribute('aria-pressed', String(x === b));
+        });
+        cb(b.dataset[key]);
+      });
+    });
+  }
+  wireSeg('size-seg', 'nodes', function (v) { state.nodes = Number(v); renderNodes(); });
+  wireSeg('mode-seg', 'mode', function (v) { state.mode = v; renderNodes(); });
+  renderNodes();
+
+  // ---------- section 4 ----------
+  var rail = { mode: 'udf' };
+  function renderYard() {
+    seed = 23;
+    var yard = document.getElementById('yard');
+    yard.innerHTML = '';
+    for (var n = 0; n < 2; n++) {
+      var yn = document.createElement('div'); yn.className = 'yard-node';
+      var t = document.createElement('div'); t.className = 'node-title';
+      t.innerHTML = '<span>Node ' + (n + 1) + ': 8 tracks</span><span class="station">cargo loaded at the warehouse itself</span>';
+      yn.appendChild(t);
+      for (var l = 0; l < 8; l++) {
+        var track = document.createElement('div'); track.className = 'track';
+        var train = document.createElement('div'); train.className = 'train';
+        train.style.setProperty('--dur', (8 + (l % 4)) + 's');
+        train.style.setProperty('--delay', (-(l * 1.3 + n * 0.7)) + 's');
+        var eng = document.createElement('div'); eng.className = 'engine';
+        eng.innerHTML = '<span class="hot"></span>Python';
+        train.appendChild(eng);
+        var idx = n * 8 + l;
+        for (var c = 0; c < 4; c++) {
+          var car = document.createElement('div'); car.className = 'car';
+          car.style.background = rail.mode === 'udf' ? STORES[Math.floor(rnd() * 8)] : STORES[idx % 8];
+          train.appendChild(car);
+        }
+        track.appendChild(train);
+        yn.appendChild(track);
+      }
+      yard.appendChild(yn);
+    }
+    var w = yard.clientWidth;
+    yard.querySelectorAll('.train').forEach(function (tr) { tr.style.setProperty('--trackw', w + 'px'); });
+    document.getElementById('rail-note').textContent = rail.mode === 'udf'
+      ? 'Small warehouse: 16 tracks. Cars of any colour (store) on any train.'
+      : 'Small warehouse: 16 tracks. Each train carries one destination (store) only.';
+  }
+  wireSeg('rail-seg', 'mode', function (v) { rail.mode = v; renderYard(); });
+  renderYard();
+  window.addEventListener('resize', function () {
+    var w = document.getElementById('yard').clientWidth;
+    document.querySelectorAll('.train').forEach(function (tr) { tr.style.setProperty('--trackw', w + 'px'); });
+  });
+})();
+</script>
+</body>
+</html>
